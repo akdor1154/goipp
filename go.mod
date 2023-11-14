@@ -1,3 +1,3 @@
-module github.com/OpenPrinting/goipp
+module github.com/akdor1154/remarkable-print/goipp
 
-go 1.11
+go 1.21.1

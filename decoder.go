@@ -79,33 +79,39 @@ func (md *messageDecoder) decode(m *Message) error {
 			done = true
 
 		case TagOperationGroup:
-			group = &m.Operation
+			fallthrough
 		case TagJobGroup:
-			group = &m.Job
+			fallthrough
 		case TagPrinterGroup:
-			group = &m.Printer
+			fallthrough
 		case TagUnsupportedGroup:
-			group = &m.Unsupported
+			fallthrough
 		case TagSubscriptionGroup:
-			group = &m.Subscription
+			fallthrough
 		case TagEventNotificationGroup:
-			group = &m.EventNotification
+			fallthrough
 		case TagResourceGroup:
-			group = &m.Resource
+			fallthrough
 		case TagDocumentGroup:
-			group = &m.Document
+			fallthrough
 		case TagSystemGroup:
-			group = &m.System
+			fallthrough
 		case TagFuture11Group:
-			group = &m.Future11
+			fallthrough
 		case TagFuture12Group:
-			group = &m.Future12
+			fallthrough
 		case TagFuture13Group:
-			group = &m.Future13
+			fallthrough
 		case TagFuture14Group:
-			group = &m.Future14
+			fallthrough
 		case TagFuture15Group:
-			group = &m.Future15
+			// start a new group
+			newGroup := &AttributeGroup{
+				Tag:   tag,
+				Attrs: nil,
+			}
+			m.Groups = append(m.Groups, newGroup)
+			group = &newGroup.Attrs
 
 		default:
 			// Decode attribute
@@ -150,19 +156,20 @@ func (md *messageDecoder) decode(m *Message) error {
 // of named attributes. Collections can be nested.
 //
 // Wire format:
-//   ATTR: Tag = TagBeginCollection,            - the outer attribute that
-//         Name = "name", value - ignored         contains the collection
 //
-//   ATTR: Tag = TagMemberName, name = "",      - member name  \
-//         value - string, name of the next                     |
-//         member                                               | repeated for
-//                                                              | each member
-//   ATTR: Tag = any attribute tag, name = "",  - repeated for  |
-//         value = member value                   multi-value  /
-//                                                members
+//	ATTR: Tag = TagBeginCollection,            - the outer attribute that
+//	      Name = "name", value - ignored         contains the collection
 //
-//   ATTR: Tag = TagEndCollection, name = "",
-//         value - ignored
+//	ATTR: Tag = TagMemberName, name = "",      - member name  \
+//	      value - string, name of the next                     |
+//	      member                                               | repeated for
+//	                                                           | each member
+//	ATTR: Tag = any attribute tag, name = "",  - repeated for  |
+//	      value = member value                   multi-value  /
+//	                                             members
+//
+//	ATTR: Tag = TagEndCollection, name = "",
+//	      value - ignored
 //
 // The format looks a bit baroque, but please note that it was added
 // in the IPP 2.0. For IPP 1.x collection looks like a single multi-value
@@ -268,9 +275,10 @@ func (md *messageDecoder) decodeCode() (Code, error) {
 // Decode a single attribute
 //
 // Wire format:
-//   1   byte:   Tag
-//   2+N bytes:  Name length (2 bytes) + name string
-//   2+N bytes:  Value length (2 bytes) + value bytes
+//
+//	1   byte:   Tag
+//	2+N bytes:  Name length (2 bytes) + name string
+//	2+N bytes:  Value length (2 bytes) + value bytes
 //
 // For the extended tag format, Tag is encoded as TagExtension and
 // 4 bytes of the actual tag value prepended to the value bytes

@@ -12,7 +12,7 @@ import (
 	"fmt"
 )
 
-// Attributes represents a slice of attributes
+// Attributes represents a group of attributes
 type Attributes []Attribute
 
 // Add Attribute to Attributes
