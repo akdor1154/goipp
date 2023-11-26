@@ -68,6 +68,10 @@ func (md *messageDecoder) decode(m *Message) error {
 		var tag Tag
 		tag, err = md.decodeTag()
 
+		if err != nil {
+			break
+		}
+
 		if tag.IsDelimiter() {
 			prev = nil
 		}
@@ -190,13 +194,13 @@ func (md *messageDecoder) decodeCollection() (Collection, error) {
 
 		// Delimiter cannot be inside a collection
 		if tag.IsDelimiter() {
-			err = fmt.Errorf("collection: unexpected %s", tag)
+			err = fmt.Errorf("Collection: unexpected tag %s", tag)
 			return nil, err
 		}
 
 		// Check for TagMemberName without the subsequent value attribute
 		if (tag == TagMemberName || tag == TagEndCollection) && memberName != "" {
-			err = fmt.Errorf("collection: unexpected %s, expected value tag", tag)
+			err = fmt.Errorf("Collection: unexpected %s, expected value tag", tag)
 			return nil, err
 		}
 
@@ -214,7 +218,7 @@ func (md *messageDecoder) decodeCollection() (Collection, error) {
 		case TagMemberName:
 			memberName = string(attr.Values[0].V.(String))
 			if memberName == "" {
-				err = fmt.Errorf("collection: %s contains empty attribute name", tag)
+				err = fmt.Errorf("Collection: %s value is empty", tag)
 				return nil, err
 			}
 
@@ -228,12 +232,12 @@ func (md *messageDecoder) decodeCollection() (Collection, error) {
 
 		default:
 			if md.opt.EnableWorkarounds &&
+				memberName == "" && attr.Name != "" {
 				// Workaround for: Pantum M7300FDW
 				//
 				// This device violates collection encoding rules.
 				// Instead of using TagMemberName, it uses named
 				// attributes within the collection
-				memberName == "" && attr.Name != "" {
 				memberName = attr.Name
 			}
 
@@ -246,7 +250,7 @@ func (md *messageDecoder) decodeCollection() (Collection, error) {
 				collection[l-1].Values.Add(tag, attr.Values[0].V)
 			} else {
 				// We've got a value without preceding TagMemberName
-				err = fmt.Errorf("collection: unexpected %s, expected %s", tag, TagMemberName)
+				err = fmt.Errorf("Collection: unexpected %s, expected %s", tag, TagMemberName)
 				return nil, err
 			}
 		}
@@ -385,8 +389,11 @@ func (md *messageDecoder) read(data []byte) error {
 		if n > 0 {
 			md.cnt += n
 			data = data[n:]
-		} else if err != nil {
+		} else {
 			md.off = md.cnt
+			if err == nil || err == io.EOF {
+				err = errors.New("Message truncated")
+			}
 			return err
 		}
 

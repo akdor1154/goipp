@@ -8,11 +8,51 @@ package goipp
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
+	"io"
 	"io/ioutil"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
+
+// errWriter implements io.Writer interface
+//
+// it accepts some first bytes and after that always returns an error
+type errWriter struct{ skip int }
+
+var _ = io.Writer(&errWriter{})
+
+func (ewr *errWriter) Write(data []byte) (int, error) {
+	if len(data) <= ewr.skip {
+		ewr.skip -= len(data)
+		return len(data), nil
+	}
+
+	n := ewr.skip
+	ewr.skip = 0
+
+	return n, errors.New("I/O error")
+}
+
+// errValue implements Value interface and returns
+// error from its encode() and decode() methods
+type errValue struct{}
+
+var _ = Value(errValue{})
+
+func (errValue) String() string { return "" }
+func (errValue) Type() Type     { return TypeInteger }
+
+func (errValue) encode() ([]byte, error) {
+	return nil, errors.New("encode error")
+}
+
+func (errValue) decode([]byte) (Value, error) {
+	return nil, errors.New("decode error")
+}
 
 // Check that err == nil
 func assertNoError(t *testing.T, err error) {
@@ -25,6 +65,20 @@ func assertNoError(t *testing.T, err error) {
 func assertWithError(t *testing.T, err error) {
 	if err == nil {
 		t.Errorf("Error expected")
+	}
+}
+
+// Check that err != nil and contains expected test
+func assertErrorIs(t *testing.T, err error, s string) {
+	if err == nil {
+		if s != "" {
+			t.Errorf("Error expected")
+		}
+		return
+	}
+
+	if !strings.HasPrefix(err.Error(), s) {
+		t.Errorf("Error is %q, expected %q", err, s)
 	}
 }
 
@@ -66,15 +120,26 @@ func assertDecodeErr(t *testing.T, data []byte, val Value) {
 	}
 }
 
+// parseTime parses time given in time.Layout format.
+// this function panics if time cannot be parsed
+func parseTime(s string) Time {
+	t, err := time.Parse(time.Layout, s)
+	if err != nil {
+		panic(fmt.Sprintf("parseTime(%q): %s", s, err))
+	}
+	return Time{t}
+}
+
 // Test String() methods for various types
 func TestString(t *testing.T) {
 	// Here we test that T.String() doesn't crash for
 	// values out of range
 	for i := -1000; i <= 10000; i++ {
-		Op(i).String()
-		Status(i).String()
-		Type(i).String()
-		Tag(i).String()
+		_ = Op(i).String()
+		_ = Status(i).String()
+		_ = Type(i).String()
+		_ = Tag(i).String()
+		_ = Units(i).String()
 	}
 }
 
@@ -232,6 +297,31 @@ func TestAttributesEqual(t *testing.T) {
 	}
 }
 
+// Test (Message) Equal()
+func TestMessageEqual(t *testing.T) {
+	var m1, m2 Message
+	// Test: Version, Code, RequestID mismatch makes messages non-equal
+	m1 = Message{Version: 0, Code: 1, RequestID: 2}
+
+	m2 = m1
+	m2.Version++
+	if m1.Equal(m2) {
+		t.Errorf("(Message) Equal(): ignores difference in Version")
+	}
+
+	m2 = m1
+	m2.Code++
+	if m1.Equal(m2) {
+		t.Errorf("(Message) Equal(): ignores difference in Code")
+	}
+
+	m2 = m1
+	m2.RequestID++
+	if m1.Equal(m2) {
+		t.Errorf("(Message) Equal(): ignores difference in RequestID")
+	}
+}
+
 // Test Version
 func TestVersion(t *testing.T) {
 	v := MakeVersion(1, 2)
@@ -241,6 +331,737 @@ func TestVersion(t *testing.T) {
 	if v.String() != "1.2" {
 		t.Errorf("(Version)String() test failed")
 	}
+}
+
+// testEncodeDecodeMessage creates a quite complex message
+// for Encode/Decode test
+func testEncodeDecodeMessage() *Message {
+	m := &Message{
+		Version:   DefaultVersion,
+		Code:      0x1234,
+		RequestID: 0x87654321,
+	}
+
+	// Populate all groups
+	m.Operation.Add(MakeAttribute("grp_operation", TagInteger,
+		Integer(1)))
+	m.Job.Add(MakeAttribute("grp_job", TagInteger,
+		Integer(2)))
+	m.Printer.Add(MakeAttribute("grp_printer", TagInteger,
+		Integer(3)))
+	m.Unsupported.Add(MakeAttribute("grp_unsupported", TagInteger,
+		Integer(4)))
+	m.Subscription.Add(MakeAttribute("grp_subscription", TagInteger,
+		Integer(5)))
+	m.EventNotification.Add(MakeAttribute("grp_eventnotification", TagInteger,
+		Integer(6)))
+	m.Resource.Add(MakeAttribute("grp_resource", TagInteger,
+		Integer(7)))
+	m.Document.Add(MakeAttribute("grp_document", TagInteger,
+		Integer(8)))
+	m.System.Add(MakeAttribute("grp_system", TagInteger,
+		Integer(9)))
+	m.Future11.Add(MakeAttribute("grp_future11", TagInteger,
+		Integer(10)))
+	m.Future12.Add(MakeAttribute("grp_future12", TagInteger,
+		Integer(11)))
+	m.Future13.Add(MakeAttribute("grp_future13", TagInteger,
+		Integer(12)))
+	m.Future14.Add(MakeAttribute("grp_future14", TagInteger,
+		Integer(13)))
+	m.Future15.Add(MakeAttribute("grp_future15", TagInteger,
+		Integer(14)))
+
+	// Use all possible attribute types
+	m.Operation.Add(MakeAttribute("type_integer", TagInteger, Integer(123)))
+
+	m.Operation.Add(MakeAttribute("type_boolean_t", TagBoolean, Boolean(true)))
+	m.Operation.Add(MakeAttribute("type_boolean_f", TagBoolean, Boolean(false)))
+
+	m.Operation.Add(MakeAttribute("type_void", TagUnsupportedValue, Void{}))
+
+	m.Operation.Add(MakeAttribute("type_string_1", TagText, String("hello")))
+	m.Operation.Add(MakeAttribute("type_string_2", TagText, String("")))
+
+	m.Operation.Add(MakeAttribute("type_time_1", TagDateTime,
+		parseTime("01/02 03:04:05PM '06 -0700")))
+	m.Operation.Add(MakeAttribute("type_time_2", TagDateTime,
+		parseTime("01/02 03:04:05PM '06 +0700")))
+	m.Operation.Add(MakeAttribute("type_time_3", TagDateTime,
+		parseTime("01/02 03:04:05PM '06 -0730")))
+
+	m.Operation.Add(MakeAttribute("type_resolution_1", TagResolution,
+		Resolution{123, 456, UnitsDpi}))
+	m.Operation.Add(MakeAttribute("type_resolution_2", TagResolution,
+		Resolution{78, 90, UnitsDpcm}))
+
+	m.Operation.Add(MakeAttribute("type_range", TagRange,
+		Range{100, 1000}))
+
+	m.Operation.Add(MakeAttribute("type_textlang_1", TagTextLang,
+		TextWithLang{"hello", "en"}))
+	m.Operation.Add(MakeAttribute("type_textlang_1", TagTextLang,
+		TextWithLang{"привет", "ru"}))
+
+	return m
+}
+
+// Test Message Encode, then Decode
+func TestEncodeDecode(t *testing.T) {
+	m1 := testEncodeDecodeMessage()
+
+	data, err := m1.EncodeBytes()
+	assertNoError(t, err)
+
+	m2 := &Message{}
+	err = m2.DecodeBytes(data)
+	assertNoError(t, err)
+}
+
+// Test encode errors
+func TestEncodeErrors(t *testing.T) {
+	// Attribute without name
+	m := NewRequest(DefaultVersion, OpGetPrinterAttributes, 0x12345678)
+	a := MakeAttribute("attr", TagInteger, Integer(123))
+	a.Name = ""
+	m.Operation.Add(a)
+	err := m.Encode(ioutil.Discard)
+	assertErrorIs(t, err, "Attribute without name")
+
+	// Attribute without value
+	m = NewRequest(DefaultVersion, OpGetPrinterAttributes, 0x12345678)
+	a = MakeAttribute("attr", TagInteger, Integer(123))
+	a.Values = nil
+	m.Operation.Add(a)
+	err = m.Encode(ioutil.Discard)
+	assertErrorIs(t, err, "Attribute without value")
+
+	// Attribute name exceeds...
+	m = NewRequest(DefaultVersion, OpGetPrinterAttributes, 0x12345678)
+	a = MakeAttribute("attr", TagInteger, Integer(123))
+	a.Name = strings.Repeat("x", 32767)
+	m.Operation.Add(a)
+	err = m.Encode(ioutil.Discard)
+	assertNoError(t, err)
+
+	m = NewRequest(DefaultVersion, OpGetPrinterAttributes, 0x12345678)
+	a = MakeAttribute("attr", TagInteger, Integer(123))
+	a.Name = strings.Repeat("x", 32767+1)
+	m.Operation.Add(a)
+	err = m.Encode(ioutil.Discard)
+	assertErrorIs(t, err, "Attribute name exceeds 32767 bytes")
+
+	// Attribute value exceeds...
+	m = NewRequest(DefaultVersion, OpGetPrinterAttributes, 0x12345678)
+	a = MakeAttribute("attr", TagText, String(strings.Repeat("x", 32767)))
+	m.Operation.Add(a)
+	err = m.Encode(ioutil.Discard)
+	assertNoError(t, err)
+
+	m = NewRequest(DefaultVersion, OpGetPrinterAttributes, 0x12345678)
+	a = MakeAttribute("attr", TagText, String(strings.Repeat("x", 32767+1)))
+	m.Operation.Add(a)
+	err = m.Encode(ioutil.Discard)
+	assertErrorIs(t, err, "Attribute value exceeds 32767 bytes")
+
+	// Tag XXX cannot be used with value
+	m = NewRequest(DefaultVersion, OpGetPrinterAttributes, 0x12345678)
+	a = MakeAttribute("attr", TagJobGroup, Integer(123))
+	m.Operation.Add(a)
+	err = m.Encode(ioutil.Discard)
+	assertErrorIs(t, err, "Tag job-attributes-tag cannot be used with value")
+
+	m = NewRequest(DefaultVersion, OpGetPrinterAttributes, 0x12345678)
+	a = MakeAttribute("attr", TagMemberName, Integer(123))
+	m.Operation.Add(a)
+	err = m.Encode(ioutil.Discard)
+	assertErrorIs(t, err, "Tag memberAttrName cannot be used with value")
+
+	m = NewRequest(DefaultVersion, OpGetPrinterAttributes, 0x12345678)
+	a = MakeAttribute("attr", TagEndCollection, Integer(123))
+	m.Operation.Add(a)
+	err = m.Encode(ioutil.Discard)
+	assertErrorIs(t, err, "Tag endCollection cannot be used with value")
+
+	// Collection member without name
+	m = NewRequest(DefaultVersion, OpGetPrinterAttributes, 0x12345678)
+	a = MakeAttribute("attr", TagBeginCollection, Collection{
+		MakeAttribute("", TagInteger, Integer(123)),
+	})
+	m.Operation.Add(a)
+	err = m.Encode(ioutil.Discard)
+	assertErrorIs(t, err, "Collection member without name")
+
+	// Tag XXX: YYY value required, ZZZ present
+	m = NewRequest(DefaultVersion, OpGetPrinterAttributes, 0x12345678)
+	a = MakeAttribute("attr", TagText, Integer(123))
+	m.Operation.Add(a)
+	err = m.Encode(ioutil.Discard)
+	assertErrorIs(t, err, "Tag textWithoutLanguage: String value required, Integer present")
+
+	// I/O error
+	m = testEncodeDecodeMessage()
+
+	data, err := m.EncodeBytes()
+	assertNoError(t, err)
+
+	for skip := 0; skip < len(data); skip++ {
+		err = m.Encode(&errWriter{skip})
+		assertErrorIs(t, err, "I/O error")
+	}
+
+	// encode error
+	m = NewRequest(DefaultVersion, OpGetPrinterAttributes, 0x12345678)
+	a = MakeAttribute("attr", TagInteger, errValue{})
+	m.Operation.Add(a)
+	err = m.Encode(ioutil.Discard)
+	assertErrorIs(t, err, "encode error")
+
+	m = NewRequest(DefaultVersion, OpGetPrinterAttributes, 0x12345678)
+	a = MakeAttribute("attr", TagBeginCollection, Collection{
+		MakeAttribute("attr", TagInteger, errValue{}),
+	})
+	m.Operation.Add(a)
+	err = m.Encode(ioutil.Discard)
+	assertErrorIs(t, err, "encode error")
+}
+
+// Test decode errors
+func TestDecodeErrors(t *testing.T) {
+	var d []byte
+	var err error
+	var m = &Message{}
+
+	hdr := []byte{
+		0x01, 0x01, // IPP version
+		0x00, 0x02, // Print-Job operation
+		0x01, 0x02, 0x03, 0x04, // Request ID
+	}
+
+	body := []byte{}
+
+	// Message truncated
+	body = []byte{
+		uint8(TagJobGroup),
+		uint8(TagInteger),
+		0x00, 0x04, // Name length + name
+		'a', 't', 't', 'r',
+		0x00, 0x04, // Value length + value
+		0x00, 0x00, 0x54, 0x56,
+	}
+
+	d = append(hdr, body...)
+	err = m.DecodeBytes(d)
+	assertErrorIs(t, err, "Message truncated at")
+
+	d, err = testEncodeDecodeMessage().EncodeBytes()
+	assertNoError(t, err)
+
+	for i := 0; i < len(d); i++ {
+		err = m.DecodeBytes(d[:i])
+		assertErrorIs(t, err, "Message truncated at")
+	}
+
+	d = goodMessage1
+	for i := 0; i < len(d); i++ {
+		err = m.DecodeBytes(d[:i])
+		assertErrorIs(t, err, "Message truncated at")
+	}
+
+	// Invalid tag 0
+	d = append(hdr, 0)
+	err = m.DecodeBytes(d)
+	assertErrorIs(t, err, "Invalid tag 0 at 0x8")
+
+	// Attribute without a group
+	body = []byte{
+		uint8(TagInteger),
+		0x00, 0x04, // Name length + name
+		'a', 't', 't', 'r',
+		0x00, 0x04, // Value length + value
+		0x00, 0x00, 0x54, 0x56,
+		uint8(TagEnd),
+	}
+
+	d = append(hdr, uint8(TagJobGroup))
+	d = append(d, body...)
+	err = m.DecodeBytes(d)
+	assertNoError(t, err)
+
+	err = m.DecodeBytes(append(hdr, body...))
+	assertErrorIs(t, err, "Attribute without a group at")
+
+	// Additional value without preceding attribute
+	body = []byte{
+		uint8(TagJobGroup),
+		uint8(TagInteger),
+		0x00, 0x00, // No name
+		0x00, 0x04, // Value length + value
+		0x00, 0x00, 0x54, 0x56,
+		uint8(TagEnd),
+	}
+
+	err = m.DecodeBytes(append(hdr, body...))
+	assertErrorIs(t, err, "Additional value without preceding attribute")
+
+	// "Unexpected tag XXX"
+	for _, tag := range []Tag{TagMemberName, TagEndCollection} {
+		body = []byte{
+			uint8(TagJobGroup),
+			uint8(TagInteger),
+			0x00, 0x04, // Name length + name
+			'a', 't', 't', 'r',
+			0x00, 0x04, // Value length + value
+			0x00, 0x00, 0x54, 0x56,
+		}
+
+		d = append(hdr, body...)
+		d = append(d, uint8(tag))
+		d = append(d, uint8(TagEnd))
+		err = m.DecodeBytes(d)
+		assertErrorIs(t, err, "Unexpected tag")
+	}
+
+	// Collection: unexpected tag XXX
+	for tag := TagZero; tag.IsDelimiter(); tag++ {
+		body = []byte{
+			uint8(TagJobGroup),
+
+			uint8(TagBeginCollection),
+			0x00, 0x0a, // Name length + name
+			'c', 'o', 'l', 'l', 'e', 'c', 't', 'i', 'o', 'n',
+			0x00, 0x00, // No value
+
+			uint8(TagMemberName),
+			0x00, 0x00, // No name
+			0x00, 0x06, // Value length + value
+			'm', 'e', 'm', 'b', 'e', 'r',
+
+			uint8(TagInteger),
+			0x00, 0x00, // No name
+			0x00, 0x04, // Value length + value
+			0x00, 0x00, 0x54, 0x56,
+
+			uint8(tag),
+
+			uint8(TagEndCollection),
+			0x00, 0x00, // No name
+			0x00, 0x00, // No value
+		}
+
+		d = append(hdr, body...)
+		d = append(d, uint8(TagEnd))
+		err = m.DecodeBytes(d)
+		assertErrorIs(t, err, "Collection: unexpected tag")
+	}
+
+	// Collection: unexpected endCollection, expected value tag
+	body = []byte{
+		uint8(TagJobGroup),
+
+		uint8(TagBeginCollection),
+		0x00, 0x0a, // Name length + name
+		'c', 'o', 'l', 'l', 'e', 'c', 't', 'i', 'o', 'n',
+		0x00, 0x00, // No value
+
+		uint8(TagMemberName),
+		0x00, 0x00, // No name
+		0x00, 0x06, // Value length + value
+		'm', 'e', 'm', 'b', 'e', 'r',
+
+		uint8(TagEndCollection),
+		0x00, 0x00, // No name
+		0x00, 0x00, // No value
+
+		uint8(TagEnd),
+	}
+
+	d = append(hdr, body...)
+	err = m.DecodeBytes(d)
+	assertErrorIs(t, err, "Collection: unexpected endCollection, expected value tag")
+
+	// Collection: unexpected memberAttrName, expected value tag
+	body = []byte{
+		uint8(TagJobGroup),
+
+		uint8(TagBeginCollection),
+		0x00, 0x0a, // Name length + name
+		'c', 'o', 'l', 'l', 'e', 'c', 't', 'i', 'o', 'n',
+		0x00, 0x00, // No value
+
+		uint8(TagMemberName),
+		0x00, 0x00, // No name
+		0x00, 0x07, // Value length + value
+		'm', 'e', 'm', 'b', 'e', 'r', '1',
+
+		uint8(TagMemberName),
+		0x00, 0x00, // No name
+		0x00, 0x07, // Value length + value
+		'm', 'e', 'm', 'b', 'e', 'r', '2',
+
+		uint8(TagInteger),
+		0x00, 0x00, // No name
+		0x00, 0x04, // Value length + value
+		0x00, 0x00, 0x54, 0x56,
+
+		uint8(TagEndCollection),
+		0x00, 0x00, // No name
+		0x00, 0x00, // No value
+
+		uint8(TagEnd),
+	}
+
+	d = append(hdr, body...)
+	err = m.DecodeBytes(d)
+	assertErrorIs(t, err, "Collection: unexpected memberAttrName, expected value tag")
+
+	// Collection: memberAttrName value is empty
+	body = []byte{
+		uint8(TagJobGroup),
+
+		uint8(TagBeginCollection),
+		0x00, 0x0a, // Name length + name
+		'c', 'o', 'l', 'l', 'e', 'c', 't', 'i', 'o', 'n',
+		0x00, 0x00, // No value
+
+		uint8(TagMemberName),
+		0x00, 0x00, // No name
+		0x00, 0x00, // No value
+
+		uint8(TagInteger),
+		0x00, 0x00, // No name
+		0x00, 0x04, // Value length + value
+		0x00, 0x00, 0x54, 0x56,
+
+		uint8(TagEndCollection),
+		0x00, 0x00, // No name
+		0x00, 0x00, // No value
+
+		uint8(TagEnd),
+	}
+
+	d = append(hdr, body...)
+	err = m.DecodeBytes(d)
+	assertErrorIs(t, err, "Collection: memberAttrName value is empty")
+
+	// Collection: unexpected integer, expected memberAttrName
+	body = []byte{
+		uint8(TagJobGroup),
+
+		uint8(TagBeginCollection),
+		0x00, 0x0a, // Name length + name
+		'c', 'o', 'l', 'l', 'e', 'c', 't', 'i', 'o', 'n',
+		0x00, 0x00, // No value
+
+		//uint8(TagMemberName),
+		//0x00, 0x00, // No name
+		//0x00, 0x06, // Value length + value
+		//'m', 'e', 'm', 'b', 'e', 'r',
+
+		uint8(TagInteger),
+		0x00, 0x00, // No name
+		0x00, 0x04, // Value length + value
+		0x00, 0x00, 0x54, 0x56,
+
+		uint8(TagEndCollection),
+		0x00, 0x00, // No name
+		0x00, 0x00, // No value
+
+		uint8(TagEnd),
+	}
+
+	d = append(hdr, body...)
+	err = m.DecodeBytes(d)
+	assertErrorIs(t, err, "Collection: unexpected integer, expected memberAttrName")
+}
+
+// Test errors in decoding values
+func TestDecodeValueErrors(t *testing.T) {
+	var d []byte
+	var err error
+	var m = &Message{}
+
+	hdr := []byte{
+		0x01, 0x01, // IPP version
+		0x00, 0x02, // Print-Job operation
+		0x01, 0x02, 0x03, 0x04, // Request ID
+	}
+
+	body := []byte{}
+
+	// integer: value must be 4 bytes
+	body = []byte{
+		uint8(TagJobGroup),
+		uint8(TagInteger),
+		0x00, 0x04, // Name length + name
+		'a', 't', 't', 'r',
+		0x00, 0x03, // Value length + value
+		0x00, 0x54, 0x56,
+		uint8(TagEnd),
+	}
+
+	d = append(hdr, body...)
+	err = m.DecodeBytes(d)
+	assertErrorIs(t, err, "integer: value must be 4 bytes")
+
+	// boolean: value must be 1 byte
+	body = []byte{
+		uint8(TagJobGroup),
+		uint8(TagBoolean),
+		0x00, 0x04, // Name length + name
+		'a', 't', 't', 'r',
+		0x00, 0x03, // Value length + value
+		0x00, 0x54, 0x56,
+		uint8(TagEnd),
+	}
+
+	d = append(hdr, body...)
+	err = m.DecodeBytes(d)
+	assertErrorIs(t, err, "boolean: value must be 1 byte")
+
+	// dateTime: value must be 11 bytes
+	body = []byte{
+		uint8(TagJobGroup),
+		uint8(TagDateTime),
+		0x00, 0x04, // Name length + name
+		'a', 't', 't', 'r',
+		0x00, 0x03, // Value length + value
+		0x00, 0x54, 0x56,
+		uint8(TagEnd),
+	}
+
+	d = append(hdr, body...)
+	err = m.DecodeBytes(d)
+	assertErrorIs(t, err, "dateTime: value must be 11 bytes")
+
+	// dateTime: bad XXX
+	var datetest = []struct {
+		in  []byte
+		err string
+	}{
+		//      year        month day   hour  min   sec   s/10
+		{[]byte{0x07, 0xe7, 0x02, 0x15, 0x11, 0x23, 0x32, 0x05, '+', 0x04, 0x00},
+			""},
+		{[]byte{0x07, 0xe7, 0xff, 0x15, 0x11, 0x23, 0x32, 0x05, '+', 0x04, 0x00},
+			"dateTime: bad month 255"},
+		{[]byte{0x07, 0xe7, 0x02, 0xff, 0x11, 0x23, 0x32, 0x05, '+', 0x04, 0x00},
+			"dateTime: bad day 255"},
+		{[]byte{0x07, 0xe7, 0x02, 0x15, 0xff, 0x23, 0x32, 0x05, '+', 0x04, 0x00},
+			"dateTime: bad hours 255"},
+		{[]byte{0x07, 0xe7, 0x02, 0x15, 0x11, 0xff, 0x32, 0x05, '+', 0x04, 0x00},
+			"dateTime: bad minutes 255"},
+		{[]byte{0x07, 0xe7, 0x02, 0x15, 0x11, 0x23, 0xff, 0x05, '+', 0x04, 0x00},
+			"dateTime: bad seconds 255"},
+		{[]byte{0x07, 0xe7, 0x02, 0x15, 0x11, 0x23, 0x32, 0xff, '+', 0x04, 0x00},
+			"dateTime: bad deciseconds 255"},
+		{[]byte{0x07, 0xe7, 0x02, 0x15, 0x11, 0x23, 0x32, 0x05, '?', 0x04, 0x00},
+			"dateTime: bad UTC sign"},
+		{[]byte{0x07, 0xe7, 0x02, 0x15, 0x11, 0x23, 0x32, 0x05, '-', 0xff, 0x00},
+			"dateTime: bad UTC hours 255"},
+		{[]byte{0x07, 0xe7, 0x02, 0x15, 0x11, 0x23, 0x32, 0x05, '-', 0x04, 0xff},
+			"dateTime: bad UTC minutes 255"},
+	}
+
+	for _, test := range datetest {
+		body = []byte{
+			uint8(TagJobGroup),
+			uint8(TagDateTime),
+			0x00, 0x04, // Name length + name
+			'a', 't', 't', 'r',
+			0x00, 0x0b, // Value length + value
+		}
+
+		d = append(hdr, body...)
+		d = append(d, test.in...)
+		d = append(d, uint8(TagEnd))
+
+		err = m.DecodeBytes(d)
+		assertErrorIs(t, err, test.err)
+	}
+
+	// resolution: value must be 9 bytes
+	body = []byte{
+		uint8(TagJobGroup),
+		uint8(TagResolution),
+		0x00, 0x04, // Name length + name
+		'a', 't', 't', 'r',
+		0x00, 0x03, // Value length + value
+		0x00, 0x54, 0x56,
+		uint8(TagEnd),
+	}
+
+	d = append(hdr, body...)
+	err = m.DecodeBytes(d)
+	assertErrorIs(t, err, "resolution: value must be 9 bytes ")
+
+	// rangeOfInteger: value must be 8 bytes
+	body = []byte{
+		uint8(TagJobGroup),
+		uint8(TagRange),
+		0x00, 0x04, // Name length + name
+		'a', 't', 't', 'r',
+		0x00, 0x03, // Value length + value
+		0x00, 0x54, 0x56,
+		uint8(TagEnd),
+	}
+
+	d = append(hdr, body...)
+	err = m.DecodeBytes(d)
+	assertErrorIs(t, err, "rangeOfInteger: value must be 8 bytes")
+
+	// textWithLanguage: truncated language length
+	body = []byte{
+		uint8(TagJobGroup),
+		uint8(TagTextLang),
+		0x00, 0x04, // Name length + name
+		'a', 't', 't', 'r',
+		0x00, 0x01, // Value length
+		0x00,
+		uint8(TagEnd),
+	}
+
+	d = append(hdr, body...)
+	err = m.DecodeBytes(d)
+	assertErrorIs(t, err, "textWithLanguage: truncated language length")
+
+	// textWithLanguage: truncated language name
+	body = []byte{
+		uint8(TagJobGroup),
+		uint8(TagTextLang),
+		0x00, 0x04, // Name length + name
+		'a', 't', 't', 'r',
+		0x00, 0x03, // Value length
+		0x00, 0x02, // Language length
+		'e',
+		uint8(TagEnd),
+	}
+
+	d = append(hdr, body...)
+	err = m.DecodeBytes(d)
+	assertErrorIs(t, err, "textWithLanguage: truncated language name")
+
+	// textWithLanguage: truncated text length
+	body = []byte{
+		uint8(TagJobGroup),
+		uint8(TagTextLang),
+		0x00, 0x04, // Name length + name
+		'a', 't', 't', 'r',
+		0x00, 0x05, // Value length
+		0x00, 0x02, // Language length
+		'e', 'n', // Language name
+		0x00, // Text length
+		uint8(TagEnd),
+	}
+
+	d = append(hdr, body...)
+	err = m.DecodeBytes(d)
+	assertErrorIs(t, err, "textWithLanguage: truncated text length")
+
+	// textWithLanguage: truncated text string
+	body = []byte{
+		uint8(TagJobGroup),
+		uint8(TagTextLang),
+		0x00, 0x04, // Name length + name
+		'a', 't', 't', 'r',
+		0x00, 0x09, // Value length
+		0x00, 0x02, // Language length
+		'e', 'n', // Language name
+		0x00, 0x05, // Text length
+		'h', 'e', 'l',
+		uint8(TagEnd),
+	}
+
+	d = append(hdr, body...)
+	err = m.DecodeBytes(d)
+	assertErrorIs(t, err, "textWithLanguage: truncated text string")
+
+	// textWithLanguage: extra 2 bytes at the end of value
+	body = []byte{
+		uint8(TagJobGroup),
+		uint8(TagTextLang),
+		0x00, 0x04, // Name length + name
+		'a', 't', 't', 'r',
+		0x00, 0x0d, // Value length
+		0x00, 0x02, // Language length
+		'e', 'n', // Language name
+		0x00, 0x05, // Text length
+		'h', 'e', 'l', 'l', 'o', // Test string
+		'?', '?', // Extra 2 bytes
+		uint8(TagEnd),
+	}
+
+	d = append(hdr, body...)
+	err = m.DecodeBytes(d)
+	assertErrorIs(t, err, "textWithLanguage: extra 2 bytes at the end of value")
+}
+
+// Test TagExtension
+func TestTagExtension(t *testing.T) {
+	// Ensure extension tag encodes and decodes well
+	m1 := NewResponse(DefaultVersion, StatusOk, 0x12345678)
+	m1.Operation.Add(MakeAttribute("attr", 0x12345678,
+		Binary{1, 2, 3, 4, 5}))
+
+	data, err := m1.EncodeBytes()
+	assertNoError(t, err)
+
+	m2 := Message{}
+	err = m2.DecodeBytes(data)
+	assertNoError(t, err)
+
+	if !m1.Equal(m2) {
+		t.Errorf("Message is not the same after encoding and decoding")
+	}
+
+	// Tag can't exceed 0x7fffffff, check that encoder validates it
+	m1 = NewResponse(DefaultVersion, StatusOk, 0x12345678)
+	m1.Operation.Add(MakeAttribute("attr", 0x81234567,
+		Binary{1, 2, 3, 4, 5}))
+
+	_, err = m1.EncodeBytes()
+	assertErrorIs(t, err, "Tag 0x81234567 exceeds extension tag range")
+
+	// Now prepare to decoder tests
+	var d []byte
+	var m = &Message{}
+
+	hdr := []byte{
+		0x01, 0x01, // IPP version
+		0x00, 0x02, // Print-Job operation
+		0x01, 0x02, 0x03, 0x04, // Request ID
+	}
+
+	body := []byte{}
+
+	// Extension tag truncated
+	body = []byte{
+		uint8(TagJobGroup),
+		uint8(TagExtension),
+		0x00, 0x04, // Name length + name
+		'a', 't', 't', 'r',
+		0x00, 0x03, // Value length + value
+		0x00, 0x54, 0x56,
+		uint8(TagEnd),
+	}
+
+	d = append(hdr, body...)
+	err = m.DecodeBytes(d)
+	assertErrorIs(t, err, "Extension tag truncated")
+
+	// Extension tag out of range
+	body = []byte{
+		uint8(TagJobGroup),
+		uint8(TagExtension),
+		0x00, 0x04, // Name length + name
+		'a', 't', 't', 'r',
+		0x00, 0x08, // Value length + value
+		0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0,
+		uint8(TagEnd),
+	}
+
+	d = append(hdr, body...)
+	err = m.DecodeBytes(d)
+	assertErrorIs(t, err, "Extension tag out of range")
 }
 
 // Test message decoding
